@@ -1,0 +1,4 @@
+db:
+  repository: ghcr.io/aquasecurity/trivy-db
+java-db:
+  repository: ghcr.io/aquasecurity/trivy-java-db

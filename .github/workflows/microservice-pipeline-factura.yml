@@ -256,7 +256,7 @@ jobs:
           docker tag $IMAGE_NAME:$VERSION $IMAGE_NAME:latest
 
       - name: Docker scan (Trivy) - fail on HIGH/CRITICAL
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: ms-factura:${{ steps.ver.outputs.version }}
           format: table
@@ -264,8 +264,8 @@ jobs:
           ignore-unfixed: true
           vuln-type: "os,library"
           severity: "CRITICAL,HIGH"
-          db-repository: ghcr.io/aquasecurity/trivy-db
-          java-db-repository: ghcr.io/aquasecurity/trivy-java-db
+          scanners: vuln
+          trivy-config: .trivy.yaml
 
       - name: Show images
         run: docker images | head -n 50
