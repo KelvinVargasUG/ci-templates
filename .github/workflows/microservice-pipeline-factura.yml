@@ -224,6 +224,9 @@ jobs:
   docker_build:
     runs-on: ubuntu-latest
     needs: build_test_coverage
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -255,17 +258,118 @@ jobs:
           docker build -t $IMAGE_NAME:$VERSION .
           docker tag $IMAGE_NAME:$VERSION $IMAGE_NAME:latest
 
-      - name: Docker scan (Trivy) - fail on HIGH/CRITICAL
+      # 1) Scan en JSON (no falla aquí)
+      - name: Trivy scan (JSON)
+        id: trivy_json
         uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: ms-factura:${{ steps.ver.outputs.version }}
-          format: table
-          exit-code: "1"
+          format: json
+          output: trivy.json
+          exit-code: "0"
           ignore-unfixed: true
           vuln-type: "os,library"
-          severity: "CRITICAL,HIGH"
           scanners: vuln
           trivy-config: .trivy.yaml
+
+      # 2) Detectar si hay HIGH/CRITICAL
+      - name: Check if HIGH/CRITICAL vulnerabilities exist
+        id: trivy_check
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+
+          with open("trivy.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          sevs = {"CRITICAL": 0, "HIGH": 0}
+
+          # Trivy JSON: Results -> Vulnerabilities[]
+          for r in data.get("Results", []):
+              for v in r.get("Vulnerabilities", []) or []:
+                  s = v.get("Severity")
+                  if s in sevs:
+                      sevs[s] += 1
+
+          has_vulns = (sevs["CRITICAL"] + sevs["HIGH"]) > 0
+
+          print("HIGH:", sevs["HIGH"])
+          print("CRITICAL:", sevs["CRITICAL"])
+          print("has_vulns:", has_vulns)
+
+          # Output para GitHub Actions
+          with open("${GITHUB_OUTPUT}", "a", encoding="utf-8") as out:
+              out.write(f"high={sevs['HIGH']}\n")
+              out.write(f"critical={sevs['CRITICAL']}\n")
+              out.write(f"has_vulns={'true' if has_vulns else 'false'}\n")
+          PY
+
+      # 3) Solo si hay vulns, generar HTML bonito
+      - name: Trivy scan (HTML report)
+        if: steps.trivy_check.outputs.has_vulns == 'true'
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ms-factura:${{ steps.ver.outputs.version }}
+          format: template
+          template: "@contrib/html.tpl"
+          output: trivy-report.html
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          scanners: vuln
+          trivy-config: .trivy.yaml
+
+      # 4) Subir artifact solo si hay vulns
+      - name: Upload Trivy HTML report
+        if: steps.trivy_check.outputs.has_vulns == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-report.html
+
+      # 5) Comentar en PR solo si hay vulns
+      - name: Comment PR with Trivy report link
+        if: github.event_name == 'pull_request' && steps.trivy_check.outputs.has_vulns == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const runId = context.runId;
+            const pr = context.payload.pull_request?.number;
+            if (!pr) return;
+
+            const url = `https://github.com/${owner}/${repo}/actions/runs/${runId}`;
+            const version = `${{ steps.ver.outputs.version }}`;
+            const high = `${{ steps.trivy_check.outputs.high }}`;
+            const critical = `${{ steps.trivy_check.outputs.critical }}`;
+
+            const body = [
+              "## 🔐 Trivy detectó vulnerabilidades (HIGH/CRITICAL)",
+              "",
+              `📦 Imagen: \`ms-factura:${version}\``,
+              `- CRITICAL: **${critical}**`,
+              `- HIGH: **${high}**`,
+              "",
+              `➡️ Descarga el artifact **trivy-report** desde este run: ${url}`,
+              "",
+              "> Run → Artifacts → trivy-report → abrir `trivy-report.html`."
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: pr,
+              body
+            });
+
+      # 6) Fallar el job si hay HIGH/CRITICAL (para bloquear merge)
+      - name: Fail if HIGH/CRITICAL found
+        if: steps.trivy_check.outputs.has_vulns == 'true'
+        run: |
+          echo "❌ Se encontraron vulnerabilidades HIGH/CRITICAL. Revisa el artifact trivy-report."
+          exit 1
 
       - name: Show images
         run: docker images | head -n 50
