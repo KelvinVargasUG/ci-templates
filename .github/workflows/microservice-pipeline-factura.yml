@@ -1,0 +1,75 @@
+jobs:
+  validate_version_bumped:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Fetch tags
+        run: git fetch --force --tags
+
+      - name: Read Gradle version
+        id: gradle
+        run: |
+          set -euo pipefail
+          VERSION=$(./gradlew -q printVersion | tr -d '\r' | tail -n 1)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Gradle version: $VERSION"
+
+      - name: Compute expected next tag (patch +1)
+        id: expected
+        run: |
+          set -euo pipefail
+
+          # Trae el último tag tipo 1.2.3-RELEASE (ajusta el patrón si cambia)
+          LAST_TAG=$(git tag -l '*.*.*-RELEASE' --sort=-v:refname | head -n 1 || true)
+
+          if [ -z "$LAST_TAG" ]; then
+            echo "No existen tags previos con patrón *.*.*-RELEASE; asumiré 0.0.1-RELEASE como esperado."
+            echo "last_tag=" >> "$GITHUB_OUTPUT"
+            echo "expected_tag=0.0.1-RELEASE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          base="${LAST_TAG%-RELEASE}"   # "1.2.3"
+          IFS='.' read -r major minor patch <<< "$base"
+
+          if [ -z "${major:-}" ] || [ -z "${minor:-}" ] || [ -z "${patch:-}" ]; then
+            echo "❌ No pude parsear el tag '$LAST_TAG' (esperaba X.Y.Z-RELEASE)"
+            exit 1
+          fi
+
+          next_patch=$((patch + 1))
+          EXPECTED="${major}.${minor}.${next_patch}-RELEASE"
+
+          echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
+          echo "expected_tag=$EXPECTED" >> "$GITHUB_OUTPUT"
+          echo "Last tag: $LAST_TAG"
+          echo "Expected next tag: $EXPECTED"
+
+      - name: Validate Gradle version matches expected next tag
+        run: |
+          set -euo pipefail
+          CURRENT="${{ steps.gradle.outputs.version }}"
+          EXPECTED="${{ steps.expected.outputs.expected_tag }}"
+          LAST="${{ steps.expected.outputs.last_tag }}"
+
+          echo "Versión actual (Gradle): $CURRENT"
+          echo "Último tag encontrado: ${LAST:-<ninguno>}"
+          echo "Tag calculado esperado: $EXPECTED"
+
+          if [ "$CURRENT" != "$EXPECTED" ]; then
+            echo "❌ Versión no incrementada correctamente."
+            echo "   - Versión actual: $CURRENT"
+            echo "   - Tag calculado : $EXPECTED"
+            echo "Actualiza version en Gradle para que coincida con el tag calculado."
+            exit 1
+          fi
+
+          echo "✅ OK: versión coincide con el tag calculado."
