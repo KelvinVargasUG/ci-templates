@@ -262,12 +262,13 @@ jobs:
       - name: Scan Docker image with Trivy
         uses: aquasecurity/trivy-action@0.28.0
         with:
-          image-ref: 'microservice-factura:${{ steps.ver.outputs.version }}'
-          format: 'table'
-          exit-code: '1'           # Detiene el pipeline si encuentra vulnerabilidades
-          ignore-unfixed: true     # Ignora vulnerabilidades que aún no tienen parche oficial
-          vuln-type: 'os,library'  # Escanea el SO y las librerías del Jar
-          severity: 'CRITICAL,HIGH'
+          image-ref: ms-factura:${{ steps.ver.outputs.version }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          scanners: vuln
 
       - name: Show images
         run: docker images | head -n 50
