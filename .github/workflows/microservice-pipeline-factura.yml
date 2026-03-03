@@ -93,12 +93,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Base branch: ${{ github.event.pull_request.base.ref }}"
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
 
-          git fetch origin ${{ github.event.pull_request.base.ref }}
+          echo "Base SHA: $BASE_SHA"
+          echo "Head SHA: $HEAD_SHA"
 
-          COMMITS=$(git rev-list --count origin/${{ github.event.pull_request.base.ref }}..HEAD)
+          git fetch --no-tags --prune --depth=200 origin
 
+          COMMITS=$(git rev-list --count "$BASE_SHA..$HEAD_SHA")
           echo "Commits in PR: $COMMITS"
 
           if [ "$COMMITS" -ne 1 ]; then
