@@ -259,12 +259,13 @@ jobs:
           docker build -t $IMAGE_NAME:$VERSION .
           docker tag $IMAGE_NAME:$VERSION $IMAGE_NAME:latest
 
-      - name: Scan Docker image with Trivy
+      - name: Scan Docker image
         uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: ms-factura:${{ steps.ver.outputs.version }}
           format: sarif
           output: trivy.sarif
+          exit-code: "0"
           ignore-unfixed: true
           vuln-type: "os,library"
           scanners: vuln
@@ -274,6 +275,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy.sarif
+          category: trivy-container
 
       - name: Trivy gate - fail on HIGH/CRITICAL
         uses: aquasecurity/trivy-action@0.24.0
@@ -287,5 +289,89 @@ jobs:
           scanners: vuln
           trivy-config: .trivy.yaml
 
-      - name: Show images
-        run: docker images | head -n 50
+      - name: Trivy scan (JSON for gating)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ms-factura:${{ steps.ver.outputs.version }}
+          format: json
+          output: trivy.json
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          scanners: vuln
+          trivy-config: .trivy.yaml
+
+      - name: Check HIGH/CRITICAL vulnerabilities
+        id: trivy_check
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+
+          with open("trivy.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          sevs = {"CRITICAL": 0, "HIGH": 0}
+
+          for r in data.get("Results", []) or []:
+              for v in (r.get("Vulnerabilities") or []):
+                  s = v.get("Severity")
+                  if s in sevs:
+                      sevs[s] += 1
+
+          has_vulns = (sevs["CRITICAL"] + sevs["HIGH"]) > 0
+
+          print("CRITICAL:", sevs["CRITICAL"])
+          print("HIGH:", sevs["HIGH"])
+          print("has_vulns:", has_vulns)
+
+          with open("${GITHUB_OUTPUT}", "a", encoding="utf-8") as out:
+              out.write(f"critical={sevs['CRITICAL']}\n")
+              out.write(f"high={sevs['HIGH']}\n")
+              out.write(f"has_vulns={'true' if has_vulns else 'false'}\n")
+          PY
+
+      - name: Comment PR with Code Scanning link
+        if: github.event_name == 'pull_request' && steps.trivy_check.outputs.has_vulns == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pr = context.payload.pull_request?.number;
+            if (!pr) return;
+
+            const version = `${{ steps.ver.outputs.version }}`;
+            const high = `${{ steps.trivy_check.outputs.high }}`;
+            const critical = `${{ steps.trivy_check.outputs.critical }}`;
+
+            // Link directo al Code Scanning filtrando por tool=Trivy y por el merge ref del PR
+            const codeScanningUrl =
+              `https://github.com/${owner}/${repo}/security/code-scanning?query=` +
+              encodeURIComponent(`tool:Trivy ref:refs/pull/${pr}/merge`);
+
+            const body = [
+              "## 🔐 Trivy encontró vulnerabilidades HIGH/CRITICAL",
+              "",
+              `📦 Imagen: \`ms-factura:${version}\``,
+              `- CRITICAL: **${critical}**`,
+              `- HIGH: **${high}**`,
+              "",
+              `➡️ Ver hallazgos en **Security → Code scanning**: ${codeScanningUrl}`,
+              "",
+              "> Si no aparece de inmediato, refresca: GitHub a veces tarda un poco en indexar el SARIF."
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: pr,
+              body
+            });
+
+      - name: Fail job if HIGH/CRITICAL found
+        if: steps.trivy_check.outputs.has_vulns == 'true'
+        run: |
+          echo "❌ Se encontraron vulnerabilidades HIGH/CRITICAL."
+          echo "Revisa Security → Code scanning (Trivy)."
+          exit 1
