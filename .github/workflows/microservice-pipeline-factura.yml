@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 jobs:
-  validate_pr:
+  validate_pull_request:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -114,7 +114,7 @@ jobs:
 
   build_test_coverage:
     runs-on: ubuntu-latest
-    needs: Validate_PR
+    needs: validate_pull_request
     steps:
       - uses: actions/checkout@v4
 
@@ -227,7 +227,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Baja el jar que generaste en el job anterior
       - name: Download jar artifact
         uses: actions/download-artifact@v4
         with:
@@ -240,13 +239,19 @@ jobs:
           ls -lah build/libs
           test -n "$(ls -1 build/libs/*.jar 2>/dev/null | head -n 1)" || (echo "❌ No llegó el jar" && exit 1)
 
+      - name: Read Gradle version
+        id: ver
+        run: |
+          set -euo pipefail
+          VERSION=$(./gradlew -q printVersion | tr -d '\r' | tail -n 1)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Gradle version: $VERSION"
+
       - name: Build Docker image
         run: |
           set -euo pipefail
-          # Lee version desde gradle SIN compilar (si tu printVersion no compila)
-          VERSION=$(./gradlew -q printVersion | tr -d '\r' | tail -n 1)
           IMAGE_NAME=ms-factura
-
+          VERSION="${{ steps.ver.outputs.version }}"
           docker build -t $IMAGE_NAME:$VERSION .
           docker tag $IMAGE_NAME:$VERSION $IMAGE_NAME:latest
 
