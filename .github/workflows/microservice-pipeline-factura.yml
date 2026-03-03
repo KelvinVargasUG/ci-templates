@@ -227,6 +227,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      security-events: write 
     steps:
       - uses: actions/checkout@v4
 
@@ -258,18 +259,15 @@ jobs:
           docker build -t $IMAGE_NAME:$VERSION .
           docker tag $IMAGE_NAME:$VERSION $IMAGE_NAME:latest
 
-      - name: Trivy scan (JSON)
-        id: trivy_json
-        uses: aquasecurity/trivy-action@0.24.0
+      - name: Scan Docker image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
         with:
-          image-ref: ms-factura:${{ steps.ver.outputs.version }}
-          format: json
-          output: trivy.json
-          exit-code: "0"
-          ignore-unfixed: true
-          vuln-type: "os,library"
-          scanners: vuln
-          trivy-config: .trivy.yaml
+          image-ref: 'microservice-factura:${{ steps.ver.outputs.version }}'
+          format: 'table'
+          exit-code: '1'           # Detiene el pipeline si encuentra vulnerabilidades
+          ignore-unfixed: true     # Ignora vulnerabilidades que aún no tienen parche oficial
+          vuln-type: 'os,library'  # Escanea el SO y las librerías del Jar
+          severity: 'CRITICAL,HIGH'
 
       - name: Show images
         run: docker images | head -n 50
