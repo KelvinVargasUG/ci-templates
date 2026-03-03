@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 jobs:
-  validate_version_bumped:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -87,7 +87,7 @@ jobs:
           fi
 
           echo "✅ OK: versión coincide con el tag calculado."
-          
+
       - name: Create and push tag if missing
         run: |
           set -euo pipefail
@@ -103,3 +103,22 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag "$TAG"
           git push origin "$TAG"
+      - name: Validate only one commit in PR
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+
+          echo "Base branch: ${{ github.event.pull_request.base.ref }}"
+
+          git fetch origin ${{ github.event.pull_request.base.ref }}
+
+          COMMITS=$(git rev-list --count origin/${{ github.event.pull_request.base.ref }}..HEAD)
+
+          echo "Commits in PR: $COMMITS"
+
+          if [ "$COMMITS" -ne 1 ]; then
+            echo "❌ El PR debe tener exactamente 1 commit. Tiene $COMMITS."
+            exit 1
+          fi
+
+          echo "✅ PR tiene exactamente 1 commit."
