@@ -277,62 +277,82 @@ jobs:
           sarif_file: trivy.sarif
           category: trivy-container
 
-      - name: Trivy gate - fail on HIGH/CRITICAL
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          image-ref: ms-factura:${{ steps.ver.outputs.version }}
-          format: table
-          exit-code: "1"
-          ignore-unfixed: true
-          vuln-type: "os,library"
-          severity: "CRITICAL,HIGH"
-          scanners: vuln
-          trivy-config: .trivy.yaml
-
-      - name: Trivy scan (JSON for gating)
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          image-ref: ms-factura:${{ steps.ver.outputs.version }}
-          format: json
-          output: trivy.json
-          exit-code: "0"
-          ignore-unfixed: true
-          vuln-type: "os,library"
-          scanners: vuln
-          trivy-config: .trivy.yaml
-
-      - name: Check HIGH/CRITICAL vulnerabilities
-        id: trivy_check
+      # 3) Gate: leer SARIF y detectar HIGH/CRITICAL
+      - name: Gate on HIGH/CRITICAL from SARIF
+        id: gate
         run: |
           set -euo pipefail
+          test -f trivy.sarif || (echo "❌ No existe trivy.sarif" && ls -lah && exit 1)
+
           python - <<'PY'
-          import json
+          import json, os
 
-          with open("trivy.json", "r", encoding="utf-8") as f:
-              data = json.load(f)
+          with open("trivy.sarif", "r", encoding="utf-8") as f:
+              sarif = json.load(f)
 
-          sevs = {"CRITICAL": 0, "HIGH": 0}
+          critical = 0
+          high = 0
 
-          for r in data.get("Results", []) or []:
-              for v in (r.get("Vulnerabilities") or []):
-                  s = v.get("Severity")
-                  if s in sevs:
-                      sevs[s] += 1
+          # SARIF: runs[].tool.driver.rules[] tiene metadata por ruleId (a veces incluye severidad en tags/properties)
+          for run in sarif.get("runs", []) or []:
+              rules = {}
+              driver = (run.get("tool", {}) or {}).get("driver", {}) or {}
+              for r in (driver.get("rules", []) or []):
+                  rid = r.get("id")
+                  if rid:
+                      rules[rid] = r
 
-          has_vulns = (sevs["CRITICAL"] + sevs["HIGH"]) > 0
+              for res in (run.get("results", []) or []):
+                  rid = res.get("ruleId", "")
+                  rule = rules.get(rid, {}) or {}
 
-          print("CRITICAL:", sevs["CRITICAL"])
-          print("HIGH:", sevs["HIGH"])
-          print("has_vulns:", has_vulns)
+                  # intentamos inferir severidad de lugares típicos
+                  sev = None
 
-          with open("${GITHUB_OUTPUT}", "a", encoding="utf-8") as out:
-              out.write(f"critical={sevs['CRITICAL']}\n")
-              out.write(f"high={sevs['HIGH']}\n")
-              out.write(f"has_vulns={'true' if has_vulns else 'false'}\n")
+                  # 1) tags
+                  tags = ((rule.get("properties", {}) or {}).get("tags") or [])
+                  tags_upper = [str(t).upper() for t in tags]
+                  if "CRITICAL" in tags_upper:
+                      sev = "CRITICAL"
+                  elif "HIGH" in tags_upper:
+                      sev = "HIGH"
+
+                  # 2) properties.severity
+                  if not sev:
+                      psev = (rule.get("properties", {}) or {}).get("severity")
+                      if psev:
+                          psev = str(psev).upper()
+                          if psev in ("CRITICAL", "HIGH"):
+                              sev = psev
+
+                  # 3) message fallback (último recurso)
+                  if not sev:
+                      msg = ((res.get("message", {}) or {}).get("text") or "").upper()
+                      if "CRITICAL" in msg:
+                          sev = "CRITICAL"
+                      elif "HIGH" in msg:
+                          sev = "HIGH"
+
+                  if sev == "CRITICAL":
+                      critical += 1
+                  elif sev == "HIGH":
+                      high += 1
+
+          has_vulns = (critical + high) > 0
+
+          # outputs
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a", encoding="utf-8") as f:
+              f.write(f"critical={critical}\n")
+              f.write(f"high={high}\n")
+              f.write(f"has_vulns={'true' if has_vulns else 'false'}\n")
+
+          print(f"CRITICAL={critical} HIGH={high} has_vulns={has_vulns}")
           PY
 
+      # 4) Comentario con link directo a Security → Code scanning
       - name: Comment PR with Code Scanning link
-        if: github.event_name == 'pull_request' && steps.trivy_check.outputs.has_vulns == 'true'
+        if: github.event_name == 'pull_request' && steps.gate.outputs.has_vulns == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -342,24 +362,22 @@ jobs:
             if (!pr) return;
 
             const version = `${{ steps.ver.outputs.version }}`;
-            const high = `${{ steps.trivy_check.outputs.high }}`;
-            const critical = `${{ steps.trivy_check.outputs.critical }}`;
+            const high = `${{ steps.gate.outputs.high }}`;
+            const critical = `${{ steps.gate.outputs.critical }}`;
 
-            // Link directo al Code Scanning filtrando por tool=Trivy y por el merge ref del PR
-            const codeScanningUrl =
+            // Link directo a Security → Code scanning filtrado por PR + Trivy
+            const url =
               `https://github.com/${owner}/${repo}/security/code-scanning?query=` +
               encodeURIComponent(`tool:Trivy ref:refs/pull/${pr}/merge`);
 
             const body = [
-              "## 🔐 Trivy encontró vulnerabilidades HIGH/CRITICAL",
+              "## 🔐 Trivy: HIGH/CRITICAL detectadas",
               "",
               `📦 Imagen: \`ms-factura:${version}\``,
               `- CRITICAL: **${critical}**`,
               `- HIGH: **${high}**`,
               "",
-              `➡️ Ver hallazgos en **Security → Code scanning**: ${codeScanningUrl}`,
-              "",
-              "> Si no aparece de inmediato, refresca: GitHub a veces tarda un poco en indexar el SARIF."
+              `➡️ Ver hallazgos en **Security → Code scanning**: ${url}`
             ].join("\n");
 
             await github.rest.issues.createComment({
@@ -369,9 +387,9 @@ jobs:
               body
             });
 
+      # 5) Bloquear MR (fallar job) si hay HIGH/CRITICAL
       - name: Fail job if HIGH/CRITICAL found
-        if: steps.trivy_check.outputs.has_vulns == 'true'
+        if: steps.gate.outputs.has_vulns == 'true'
         run: |
-          echo "❌ Se encontraron vulnerabilidades HIGH/CRITICAL."
-          echo "Revisa Security → Code scanning (Trivy)."
+          echo "❌ Se encontraron vulnerabilidades HIGH/CRITICAL. Bloqueando merge."
           exit 1
