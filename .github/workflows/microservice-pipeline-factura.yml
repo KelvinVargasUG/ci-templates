@@ -222,33 +222,33 @@ jobs:
   #           **/build/reports/jacoco/test/**
   
   docker_build:
-  runs-on: ubuntu-latest
-  # needs: build_test_coverage
-  steps:
-    - uses: actions/checkout@v4
+    runs-on: ubuntu-latest
+    # needs: build_test_coverage
+    steps:
+      - uses: actions/checkout@v4
 
-    # Baja el jar que generaste en el job anterior
-    - name: Download jar artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: app-jar
-        path: build/libs
+      # Baja el jar que generaste en el job anterior
+      - name: Download jar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-jar
+          path: build/libs
 
-    - name: Verify downloaded jar
-      run: |
-        set -euo pipefail
-        ls -lah build/libs
-        test -n "$(ls -1 build/libs/*.jar 2>/dev/null | head -n 1)" || (echo "❌ No llegó el jar" && exit 1)
+      - name: Verify downloaded jar
+        run: |
+          set -euo pipefail
+          ls -lah build/libs
+          test -n "$(ls -1 build/libs/*.jar 2>/dev/null | head -n 1)" || (echo "❌ No llegó el jar" && exit 1)
 
-    - name: Build Docker image
-      run: |
-        set -euo pipefail
-        # Lee version desde gradle SIN compilar (si tu printVersion no compila)
-        VERSION=$(./gradlew -q printVersion | tr -d '\r' | tail -n 1)
-        IMAGE_NAME=ms-factura
+      - name: Build Docker image
+        run: |
+          set -euo pipefail
+          # Lee version desde gradle SIN compilar (si tu printVersion no compila)
+          VERSION=$(./gradlew -q printVersion | tr -d '\r' | tail -n 1)
+          IMAGE_NAME=ms-factura
 
-        docker build -t $IMAGE_NAME:$VERSION .
-        docker tag $IMAGE_NAME:$VERSION $IMAGE_NAME:latest
+          docker build -t $IMAGE_NAME:$VERSION .
+          docker tag $IMAGE_NAME:$VERSION $IMAGE_NAME:latest
 
-    - name: Show images
-      run: docker images | head -n 50
+      - name: Show images
+        run: docker images | head -n 50
