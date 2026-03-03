@@ -170,10 +170,10 @@ jobs:
               raise SystemExit("❌ Hay pruebas fallidas/errores. Revisa el log de Gradle.")
           PY
 
-                - name: Print JaCoCo line coverage %
-                  run: |
-                    set -euo pipefail
-                    python - <<'PY'
+      - name: Print JaCoCo line coverage %
+        run: |
+          set -euo pipefail
+          python - <<'PY'
           import glob, xml.etree.ElementTree as ET
 
           paths = glob.glob("**/build/reports/jacoco/test/jacocoTestReport.xml", recursive=True)
