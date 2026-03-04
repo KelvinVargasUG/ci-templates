@@ -1,0 +1,199 @@
+name: Docker Build and Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: 'Docker image name'
+        type: string
+        required: false
+        default: "ms-factura"
+      version:
+        description: 'Version tag for the Docker image'
+        type: string
+        required: true
+
+jobs:
+  docker_build_and_scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-jar
+          path: build/libs
+
+      - name: Verify downloaded JAR
+        run: |
+          set -euo pipefail
+          ls -lah build/libs
+          JAR=$(ls -1 build/libs/*.jar 2>/dev/null | head -n 1 || true)
+          if [ -z "$JAR" ]; then
+            echo "❌ JAR artifact not found in build/libs/"
+            exit 1
+          fi
+          echo "✅ JAR artifact downloaded: $JAR"
+
+      - name: Build Docker image
+        run: |
+          set -euo pipefail
+          IMAGE_NAME="${{ inputs.image_name }}"
+          VERSION="${{ inputs.version }}"
+          docker build -t $IMAGE_NAME:$VERSION .
+          docker tag $IMAGE_NAME:$VERSION $IMAGE_NAME:latest
+          echo "✅ Docker image built: $IMAGE_NAME:$VERSION"
+
+      - name: Scan Docker image with Trivy
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ inputs.image_name }}:${{ inputs.version }}
+          format: sarif
+          output: trivy.sarif
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          scanners: vuln
+          trivy-config: .trivy.yaml
+
+      - name: Upload SARIF to GitHub Security (Code Scanning)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-container
+
+      - name: Parse SARIF and count HIGH/CRITICAL vulnerabilities
+        id: gate
+        run: |
+          set -euo pipefail
+          test -f trivy.sarif || (echo "❌ trivy.sarif not found" && ls -lah && exit 1)
+
+          python - <<'PY'
+          import json, os
+
+          with open("trivy.sarif", "r", encoding="utf-8") as f:
+              sarif = json.load(f)
+
+          critical = 0
+          high = 0
+
+          # SARIF: runs[].tool.driver.rules[] has metadata per ruleId
+          for run in sarif.get("runs", []) or []:
+              rules = {}
+              driver = (run.get("tool", {}) or {}).get("driver", {}) or {}
+              for r in (driver.get("rules", []) or []):
+                  rid = r.get("id")
+                  if rid:
+                      rules[rid] = r
+
+              for res in (run.get("results", []) or []):
+                  rid = res.get("ruleId", "")
+                  rule = rules.get(rid, {}) or {}
+
+                  # Infer severity from multiple sources
+                  sev = None
+
+                  # 1) tags
+                  tags = ((rule.get("properties", {}) or {}).get("tags") or [])
+                  tags_upper = [str(t).upper() for t in tags]
+                  if "CRITICAL" in tags_upper:
+                      sev = "CRITICAL"
+                  elif "HIGH" in tags_upper:
+                      sev = "HIGH"
+
+                  # 2) properties.severity
+                  if not sev:
+                      psev = (rule.get("properties", {}) or {}).get("severity")
+                      if psev:
+                          psev = str(psev).upper()
+                          if psev in ("CRITICAL", "HIGH"):
+                              sev = psev
+
+                  # 3) message fallback
+                  if not sev:
+                      msg = ((res.get("message", {}) or {}).get("text") or "").upper()
+                      if "CRITICAL" in msg:
+                          sev = "CRITICAL"
+                      elif "HIGH" in msg:
+                          sev = "HIGH"
+
+                  if sev == "CRITICAL":
+                      critical += 1
+                  elif sev == "HIGH":
+                      high += 1
+
+          has_vulns = (critical + high) > 0
+
+          # Write outputs
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a", encoding="utf-8") as f:
+              f.write(f"critical={critical}\n")
+              f.write(f"high={high}\n")
+              f.write(f"has_vulns={'true' if has_vulns else 'false'}\n")
+
+          print(f"CRITICAL={critical} HIGH={high} has_vulns={has_vulns}")
+          PY
+
+      - name: Comment PR with Code Scanning link
+        if: github.event_name == 'pull_request' && steps.gate.outputs.has_vulns == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pr = context.payload.pull_request?.number;
+            if (!pr) return;
+
+            const version = `${{ inputs.version }}`;
+            const high = `${{ steps.gate.outputs.high }}`;
+            const critical = `${{ steps.gate.outputs.critical }}`;
+
+            // Direct link to Security → Code scanning filtered by PR + Trivy
+            const url =
+              `https://github.com/${owner}/${repo}/security/code-scanning?query=` +
+              encodeURIComponent(`tool:Trivy ref:refs/pull/${pr}/merge`);
+
+            const body = [
+              "## 🔐 Trivy: HIGH/CRITICAL Vulnerabilities Detected",
+              "",
+              `📦 Image: \`${{ inputs.image_name }}:${version}\``,
+              `- CRITICAL: **${critical}**`,
+              `- HIGH: **${high}**`,
+              "",
+              `➡️ View findings in **Security → Code scanning**: ${url}`
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: pr,
+              body
+            });
+
+      - name: Generate step summary
+        if: always()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          ## 🐳 Docker Scan Results
+          
+          **Image:** \`${{ inputs.image_name }}:${{ inputs.version }}\`
+          
+          **Vulnerabilities:**
+          - CRITICAL: ${{ steps.gate.outputs.critical || '0' }}
+          - HIGH: ${{ steps.gate.outputs.high || '0' }}
+          
+          **Gate Status:** ${{ steps.gate.outputs.has_vulns == 'true' && '❌ BLOCKED' || '✅ PASSED' }}
+          EOF
+
+      - name: Fail job if HIGH/CRITICAL vulnerabilities found
+        if: steps.gate.outputs.has_vulns == 'true'
+        run: |
+          echo "❌ HIGH/CRITICAL vulnerabilities detected. Blocking merge."
+          exit 1

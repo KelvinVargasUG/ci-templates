@@ -1,0 +1,31 @@
+name: Reverse Merge
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_to_reverse:
+        description: 'Tag to delete'
+        required: true
+        type: string
+
+jobs:
+  reverse:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch Git tags
+        run: git fetch --force --tags
+
+      - name: Delete tag
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag_to_reverse }}"
+          echo "Deleting tag $TAG..."
+          git push origin :refs/tags/$TAG
+          echo "Tag $TAG deleted."

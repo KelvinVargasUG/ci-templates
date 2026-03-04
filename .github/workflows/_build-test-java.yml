@@ -1,0 +1,209 @@
+name: Build and Test Java Application
+
+on:
+  workflow_call:
+    inputs:
+      java_version:
+        description: 'Java version to use'
+        type: string
+        required: false
+        default: "21"
+    outputs:
+      version:
+        description: 'The Gradle project version'
+        value: ${{ jobs.build_test_coverage.outputs.version }}
+
+jobs:
+  build_test_coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.gradle_version.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+          cache: gradle
+
+      - name: Read Gradle version
+        id: gradle_version
+        uses: KelvinVargasUG/ci-templates/.github/actions/gradle-version@main
+
+      - name: Run Tests
+        run: ./gradlew unitTest componentTest integrationTest blackBoxTest
+
+      - name: Print Test Summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+
+          CATEGORIES = [
+              ("UNIT",        "build/test-results/unitTest/*.xml"),
+              ("COMPONENT",   "build/test-results/componentTest/*.xml"),
+              ("INTEGRATION", "build/test-results/integrationTest/*.xml"),
+              ("BLACKBOX",    "build/test-results/blackBoxTest/*.xml"),
+
+          ]
+
+          has_failures = False
+          grand = dict(tests=0, passed=0, failures=0, errors=0, skipped=0)
+
+          for label, pattern in CATEGORIES:
+              files = sorted(glob.glob(pattern))
+              if not files:
+                  print(f"\n⏭️  No {label} tests found")
+                  continue
+
+              tests = failures = errors = skipped = 0
+              for f in files:
+                  root = ET.parse(f).getroot()
+                  suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+                  for s in suites:
+                      tests    += int(s.attrib.get("tests", 0))
+                      failures += int(s.attrib.get("failures", 0))
+                      errors   += int(s.attrib.get("errors", 0))
+                      skipped  += int(s.attrib.get("skipped", 0))
+
+              passed = tests - failures - errors - skipped
+              icon   = "❌" if (failures or errors) else "✅"
+              has_failures = has_failures or failures > 0 or errors > 0
+
+              grand["tests"]    += tests
+              grand["passed"]   += passed
+              grand["failures"] += failures
+              grand["errors"]   += errors
+              grand["skipped"]  += skipped
+
+              print(f"\n{'=' * 40}")
+              print(f" {icon} {label} TESTS")
+              print(f"{'=' * 40}")
+              print(f"  Total   : {tests}")
+              print(f"  Passed  : {passed}")
+              print(f"  Failures: {failures}")
+              print(f"  Errors  : {errors}")
+              print(f"  Skipped : {skipped}")
+
+          icon = "❌" if has_failures else "✅"
+          print(f"\n{'=' * 40}")
+          print(f" {icon} OVERALL: {grand['passed']}/{grand['tests']} passed")
+          print(f"{'=' * 40}")
+
+          if has_failures:
+              sys.exit("❌ Test failures or errors detected.")
+          PY
+
+      - name: Quality Checks & Coverage Report
+        if: always()
+        run: |
+          set +e
+          ./gradlew check jacocoTestReport
+          GRADLE_EXIT=$?
+          set -e
+
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+
+          def print_checkstyle():
+              paths = sorted(glob.glob("**/build/reports/checkstyle/*.xml", recursive=True))
+              if not paths:
+                  print("\nℹ️  No Checkstyle reports found.")
+                  return
+              total = 0
+              print("\n=== CHECKSTYLE VIOLATIONS ===")
+              for p in paths:
+                  try:
+                      root = ET.parse(p).getroot()
+                  except Exception as e:
+                      print(f"⚠️  Could not parse {p}: {e}")
+                      continue
+                  for f in root.findall("file"):
+                      name = f.attrib.get("name", "<unknown>")
+                      for err in f.findall("error"):
+                          total += 1
+                          sev  = err.attrib.get("severity", "?")
+                          line = err.attrib.get("line", "?")
+                          col  = err.attrib.get("column", "?")
+                          msg  = err.attrib.get("message", "")
+                          src  = err.attrib.get("source", "")
+                          print(f"  [{sev}] {name}:{line}:{col} — {msg} ({src})")
+              print(f"Total Checkstyle violations: {total}")
+
+          def print_pmd():
+              paths = sorted(glob.glob("**/build/reports/pmd/*.xml", recursive=True))
+              if not paths:
+                  print("\nℹ️  No PMD reports found.")
+                  return
+              total = 0
+              print("\n=== PMD VIOLATIONS ===")
+              for p in paths:
+                  try:
+                      root = ET.parse(p).getroot()
+                  except Exception as e:
+                      print(f"⚠️  Could not parse {p}: {e}")
+                      continue
+                  for f in root.findall(".//{*}file"):
+                      name = f.attrib.get("name", "<unknown>")
+                      for v in f.findall("{*}violation"):
+                          total += 1
+                          begin    = v.attrib.get("beginline", "?")
+                          end      = v.attrib.get("endline", "?")
+                          rule     = v.attrib.get("rule", "?")
+                          priority = v.attrib.get("priority", "?")
+                          text     = " ".join((v.text or "").split())
+                          print(f"  [P{priority}] {name}:{begin}-{end} [{rule}] {text}")
+              print(f"Total PMD violations: {total}")
+
+          def print_coverage():
+              paths = glob.glob("**/build/reports/jacoco/test/jacocoTestReport.xml", recursive=True)
+              if not paths:
+                  print("\n⚠️  No JaCoCo merged report found.")
+                  return
+              root = ET.parse(paths[0]).getroot()
+              for c in root.findall("counter"):
+                  if c.attrib.get("type") == "LINE":
+                      missed  = int(c.attrib["missed"])
+                      covered = int(c.attrib["covered"])
+                      total   = missed + covered
+                      pct     = (covered / total * 100.0) if total else 0.0
+                      print(f"\n📈 JaCoCo LINE coverage: {pct:.2f}% (covered={covered}, missed={missed})")
+                      return
+
+          print_checkstyle()
+          print_pmd()
+          print_coverage()
+          PY
+
+          if [ "$GRADLE_EXIT" -ne 0 ]; then
+            echo "❌ Gradle check/jacoco failed (exit $GRADLE_EXIT)"
+            exit "$GRADLE_EXIT"
+          fi
+          
+      - name: Build
+        run: ./gradlew clean bootJar
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: build/libs/*.jar
+
+      - name: Upload reports (tests + jacoco)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            build/reports/tests/unitTest/**
+            build/reports/tests/componentTest/**
+            build/reports/tests/integrationTest/**
+            build/reports/jacoco/test/**
+            build/reports/checkstyle/*.html
+            build/reports/pmd/*.html
