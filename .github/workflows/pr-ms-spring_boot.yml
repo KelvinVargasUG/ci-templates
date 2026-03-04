@@ -1,0 +1,130 @@
+name: PR Validation and Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      java_version:
+        description: 'Java version to use'
+        type: string
+        required: false
+        default: "21"
+      promote_branch:
+        description: 'Promotion branch name (unused in PR workflow)'
+        type: string
+        required: false
+        default: "release"
+  pull_request:
+    branches:
+      - develop
+      - release
+
+concurrency:
+  group: pr-factura-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+
+jobs:
+  validate_pr:
+    runs-on: ubuntu-latest
+    outputs:
+      gradle_version: ${{ steps.gradle.outputs.version }}
+      expected_tag: ${{ steps.expected.outputs.expected_tag }}
+      last_tag: ${{ steps.expected.outputs.last_tag }}
+      commit_count: ${{ steps.commit_check.outputs.count }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version || '21' }}
+
+      - name: Fetch Git tags
+        run: git fetch --force --tags
+
+      - name: Read Gradle version
+        id: gradle
+        uses: KelvinVargasUG/ci-templates/.github/actions/gradle-version@main
+
+      - name: Compute expected next tag
+        id: expected
+        uses: KelvinVargasUG/ci-templates/.github/actions/compute-next-tag@main
+
+      - name: Validate Gradle version matches expected next tag
+        run: |
+          set -euo pipefail
+          CURRENT="${{ steps.gradle.outputs.version }}"
+          EXPECTED="${{ steps.expected.outputs.expected_tag }}"
+          LAST="${{ steps.expected.outputs.last_tag }}"
+
+          echo "Current version (Gradle): $CURRENT"
+          echo "Last tag found: ${LAST:-<none>}"
+          echo "Expected calculated tag: $EXPECTED"
+
+          if [ "$CURRENT" != "$EXPECTED" ]; then
+            echo "❌ Version not incremented correctly."
+            echo "   - Current version: $CURRENT"
+            echo "   - Expected tag   : $EXPECTED"
+            echo "Update the version in Gradle to match the expected tag."
+            exit 1
+          fi
+
+          echo "✅ OK: Version matches the expected tag."
+
+      - name: Validate only one commit in PR
+        id: commit_check
+        run: |
+          set -euo pipefail
+
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+          echo "Base SHA: $BASE_SHA"
+          echo "Head SHA: $HEAD_SHA"
+
+          git fetch --no-tags --prune --depth=200 origin
+
+          COMMITS=$(git rev-list --count "$BASE_SHA..$HEAD_SHA")
+          echo "count=$COMMITS" >> $GITHUB_OUTPUT
+          echo "Commits in PR: $COMMITS"
+
+          if [ "$COMMITS" -ne 1 ]; then
+            echo "❌ PR must have exactly 1 commit. It has $COMMITS."
+            exit 1
+          fi
+
+          echo "✅ PR has exactly 1 commit."
+
+  build_test:
+    needs: validate_pr
+    uses: ./.github/workflows/_build-test-java.yml
+    with:
+      java_version: ${{ inputs.java_version || '21' }}
+
+  docker_scan:
+    needs: build_test
+    uses: ./.github/workflows/_docker-scan.yml
+    with:
+      image_name: "ms-factura"
+      version: ${{ needs.build_test.outputs.version }}
+
+  report_pr_comment:
+    name: Report PR Comment
+    needs: [validate_pr, build_test, docker_scan]
+    if: always()
+    uses: ./.github/workflows/_pr-report.yml
+    with:
+      validate_status: ${{ needs.validate_pr.result }}
+      build_status: ${{ needs.build_test.result }}
+      docker_status: ${{ needs.docker_scan.result }}
+      gradle_version: ${{ needs.validate_pr.outputs.gradle_version }}
+      expected_tag: ${{ needs.validate_pr.outputs.expected_tag }}
+      commit_count: ${{ needs.validate_pr.outputs.commit_count }}

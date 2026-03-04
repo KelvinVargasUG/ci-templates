@@ -1,0 +1,60 @@
+name: Merge and Tag
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - develop
+      - release
+  workflow_call:
+    inputs:
+      branch:
+        description: 'Branch name'
+        required: false
+        type: string
+        default: 'develop'
+
+jobs:
+  merge_and_tag:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch Git tags
+        run: git fetch --force --tags
+
+      - name: Compute expected next tag
+        id: expected
+        uses: KelvinVargasUG/ci-templates/.github/actions/compute-next-tag@main
+
+      - name: Create and push tag if missing
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.expected.outputs.expected_tag }}"
+
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
+            echo "Tag $TAG ya existe en remoto. No hago nada."
+            exit 0
+          fi
+
+          echo "Creando tag $TAG y subiéndolo..."
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Delete merged branch
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          if [ "$BRANCH" != "main" ] && [ "$BRANCH" != "develop" ] && [ "$BRANCH" != "release" ]; then
+            echo "Deleting branch $BRANCH"
+            git push origin --delete "$BRANCH"
+          else
+            echo "Not deleting protected branch $BRANCH"
+          fi
