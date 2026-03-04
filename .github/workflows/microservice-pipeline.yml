@@ -1,4 +1,4 @@
-name: Microservice pipeline - Factura
+name: Microservice pipeline
 
 on:
   workflow_call:
