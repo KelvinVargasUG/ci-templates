@@ -1,0 +1,19 @@
+name: 'Read Gradle Version'
+description: 'Reads the project version from Gradle and outputs it'
+
+outputs:
+  version:
+    description: 'The Gradle project version'
+    value: ${{ steps.get_version.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read Gradle version
+      id: get_version
+      shell: bash
+      run: |
+        set -euo pipefail
+        VERSION=$(./gradlew -q printVersion | tr -d '\r' | tail -n 1)
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "Gradle version: $VERSION"

@@ -1,0 +1,64 @@
+name: 'Compute Next Semantic Version Tag'
+description: 'Calculates the expected next semantic version tag based on the latest tag'
+
+inputs:
+  pattern:
+    description: 'Git tag pattern to match'
+    required: false
+    default: '*.*.*-RELEASE'
+  suffix:
+    description: 'Suffix to append to the version (e.g., -RELEASE)'
+    required: false
+    default: '-RELEASE'
+
+outputs:
+  last_tag:
+    description: 'The most recent tag matching the pattern'
+    value: ${{ steps.compute.outputs.last_tag }}
+  expected_tag:
+    description: 'The calculated next semantic version tag'
+    value: ${{ steps.compute.outputs.expected_tag }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch tags and compute next version
+      id: compute
+      shell: bash
+      run: |
+        set -euo pipefail
+        
+        # Fetch all tags
+        git fetch --force --tags
+        
+        # Get the latest tag matching the pattern
+        PATTERN="${{ inputs.pattern }}"
+        SUFFIX="${{ inputs.suffix }}"
+        LAST_TAG=$(git tag -l "$PATTERN" --sort=-v:refname | head -n 1 || true)
+        
+        if [ -z "$LAST_TAG" ]; then
+          echo "No existing tags match pattern '$PATTERN'; setting expected tag to 0.0.1$SUFFIX"
+          echo "last_tag=" >> "$GITHUB_OUTPUT"
+          echo "expected_tag=0.0.1$SUFFIX" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        
+        # Parse the tag (remove suffix)
+        base="${LAST_TAG%$SUFFIX}"
+        
+        # Split into major.minor.patch
+        IFS='.' read -r major minor patch <<< "$base"
+        
+        if [ -z "${major:-}" ] || [ -z "${minor:-}" ] || [ -z "${patch:-}" ]; then
+          echo "❌ Failed to parse tag '$LAST_TAG' (expected X.Y.Z$SUFFIX format)"
+          exit 1
+        fi
+        
+        # Increment patch version
+        next_patch=$((patch + 1))
+        EXPECTED="${major}.${minor}.${next_patch}${SUFFIX}"
+        
+        echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
+        echo "expected_tag=$EXPECTED" >> "$GITHUB_OUTPUT"
+        echo "Last tag: $LAST_TAG"
+        echo "Expected next tag: $EXPECTED"

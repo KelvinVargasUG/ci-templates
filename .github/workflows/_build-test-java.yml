@@ -1,0 +1,133 @@
+name: Build and Test Java Application
+
+on:
+  workflow_call:
+    inputs:
+      java_version:
+        description: 'Java version to use'
+        type: string
+        required: false
+        default: "21"
+    outputs:
+      version:
+        description: 'The Gradle project version'
+        value: ${{ jobs.build_test_coverage.outputs.version }}
+
+jobs:
+  build_test_coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.gradle_version.outputs.version }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+          cache: gradle
+
+      - name: Read Gradle version
+        id: gradle_version
+        uses: KelvinVargasUG/ci-templates/.github/actions/gradle-version@main
+
+      - name: Build, test, and generate coverage
+        run: |
+          set -euo pipefail
+          ./gradlew clean test check bootJar jacocoTestReport jacocoTestCoverageVerification
+
+      - name: Verify JAR exists
+        run: |
+          set -euo pipefail
+          ls -lah build/libs || true
+          JAR=$(ls -1 build/libs/*.jar 2>/dev/null | head -n 1 || true)
+          if [ -z "$JAR" ]; then
+            echo "❌ No JAR file generated in build/libs/"
+            exit 1
+          fi
+          echo "✅ JAR generated: $JAR"
+
+      - name: Print test summary (passed/failed/skipped)
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+
+          files = glob.glob("**/build/test-results/test/*.xml", recursive=True)
+          if not files:
+              raise SystemExit("❌ No JUnit XML files found in **/build/test-results/test/*.xml")
+
+          tests = failures = errors = skipped = 0
+          for f in files:
+              root = ET.parse(f).getroot()
+              # Can be <testsuite> or <testsuites>
+              suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+              for s in suites:
+                  tests += int(s.attrib.get("tests", 0))
+                  failures += int(s.attrib.get("failures", 0))
+                  errors += int(s.attrib.get("errors", 0))
+                  skipped += int(s.attrib.get("skipped", 0))
+
+          passed = tests - failures - errors - skipped
+          print(f"✅ Tests total: {tests}")
+          print(f"✅ Passed    : {passed}")
+          print(f"❌ Failures  : {failures}")
+          print(f"❌ Errors    : {errors}")
+          print(f"⏭️  Skipped   : {skipped}")
+
+          if failures or errors:
+              raise SystemExit("❌ Test failures or errors detected. Review the Gradle log.")
+          PY
+
+      - name: Print JaCoCo line coverage %
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+
+          paths = glob.glob("**/build/reports/jacoco/test/jacocoTestReport.xml", recursive=True)
+          if not paths:
+              raise SystemExit("❌ No jacocoTestReport.xml found. Ensure xml.required=true is configured.")
+
+          p = paths[0]
+          root = ET.parse(p).getroot()
+
+          # Find the LINE counter at report level
+          line = None
+          for c in root.findall("counter"):
+              if c.attrib.get("type") == "LINE":
+                  line = c
+                  break
+
+          if line is None:
+              raise SystemExit("❌ No LINE counter found in JaCoCo report")
+
+          missed = int(line.attrib["missed"])
+          covered = int(line.attrib["covered"])
+          total = missed + covered
+          pct = (covered / total * 100.0) if total else 0.0
+
+          print(f"📈 JaCoCo LINE coverage: {pct:.2f}% (covered={covered}, missed={missed})")
+
+          if pct < 90.0:
+              raise SystemExit("❌ Coverage is below 90% threshold")
+          PY
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: build/libs/*.jar
+
+      - name: Upload reports (tests + jacoco)
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            **/build/reports/tests/test/**
+            **/build/reports/jacoco/test/**

@@ -1,0 +1,33 @@
+schema: spec-driven
+
+# Project context
+# Full project documentation in openspec/project.md
+context: |
+  Tech stack: GitHub Actions, YAML workflows, Java/Gradle, Docker, Trivy
+  
+  Domain: Reusable CI/CD templates for Java microservices
+  
+  Key conventions:
+  - Semantic versioning: X.Y.Z-RELEASE format
+  - One commit per PR (enforced)
+  - Version must be incremented before merge
+  - Use 'set -euo pipefail' in all bash scripts
+  - Workflows: prefix reusable workflows with '_'
+  - Error messages: ❌ for errors, ✅ for success
+  - Python for parsing XML/JSON in workflows
+  - JaCoCo coverage minimum: 90% line coverage
+  - Trivy security scanning: block on HIGH/CRITICAL vulnerabilities
+  
+  See openspec/project.md for complete documentation.
+
+# Per-artifact rules
+rules:
+  proposal:
+    - Keep proposals focused on CI/CD workflow improvements
+    - Consider backward compatibility with existing projects using these templates
+    - Document any new inputs or configuration requirements
+  
+  tasks:
+    - Break tasks into testable increments
+    - Include validation steps for workflow changes
+    - Consider security implications for any secrets or permissions changes

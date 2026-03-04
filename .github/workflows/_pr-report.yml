@@ -1,0 +1,128 @@
+name: PR Report Comment
+
+on:
+  workflow_call:
+    inputs:
+      validate_status:
+        description: 'Status of validate job'
+        type: string
+        required: true
+      build_status:
+        description: 'Status of build job'
+        type: string
+        required: true
+      docker_status:
+        description: 'Status of docker job'
+        type: string
+        required: true
+      gradle_version:
+        description: 'Gradle version detected'
+        type: string
+        required: true
+      expected_tag:
+        description: 'Expected tag'
+        type: string
+        required: true
+      commit_count:
+        description: 'Number of commits in PR'
+        type: string
+        required: true
+
+permissions:
+  pull-requests: write
+
+jobs:
+  report_pr_comment:
+    name: Report PR Comment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine Pipeline Status
+        id: status
+        run: |
+          validate_status="${{ inputs.validate_status }}"
+          build_status="${{ inputs.build_status }}"
+          docker_status="${{ inputs.docker_status }}"
+          
+          if [[ "$validate_status" == "success" && "$build_status" == "success" && "$docker_status" == "success" ]]; then
+            echo "overall=✅ EXITOSO" >> $GITHUB_OUTPUT
+            echo "overall_emoji=✅" >> $GITHUB_OUTPUT
+            echo "color=green" >> $GITHUB_OUTPUT
+          else
+            echo "overall=❌ FALLÓ" >> $GITHUB_OUTPUT
+            echo "overall_emoji=❌" >> $GITHUB_OUTPUT
+            echo "color=red" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "validate_status=$validate_status" >> $GITHUB_OUTPUT
+          echo "build_status=$build_status" >> $GITHUB_OUTPUT
+          echo "docker_status=$docker_status" >> $GITHUB_OUTPUT
+
+      - name: Create PR Comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const validate_status = "${{ steps.status.outputs.validate_status }}";
+            const build_status = "${{ steps.status.outputs.build_status }}";
+            const docker_status = "${{ steps.status.outputs.docker_status }}";
+            const overall = "${{ steps.status.outputs.overall }}";
+            const overall_emoji = "${{ steps.status.outputs.overall_emoji }}";
+            
+            const getStatusIcon = (status) => {
+              return status === "success" ? "✅" : status === "failure" ? "❌" : "⏭️";
+            };
+            
+            const gradle_version = "${{ inputs.gradle_version }}";
+            const expected_tag = "${{ inputs.expected_tag }}";
+            const commit_count = "${{ inputs.commit_count }}";
+            
+            const comment = `## ${overall_emoji} Reporte de Pipeline
+
+            ### Estado General: ${overall}
+
+            ---
+
+            ### 📋 Job: Validación de PR
+            **Estado:** ${getStatusIcon(validate_status)} ${validate_status}
+
+            **Evaluaciones realizadas:**
+            - ✔️ Versión en Gradle: \`${gradle_version}\`
+            - ✔️ Tag esperado: \`${expected_tag}\`
+            - ✔️ Cantidad de commits: \`${commit_count}\`
+            - ✔️ Validación de versión: Coincide con el tag esperado
+            - ✔️ Validación de commits: Exactamente 1 commit en el PR
+
+            ---
+
+            ### 🏗️ Job: Build & Test
+            **Estado:** ${getStatusIcon(build_status)} ${build_status}
+
+            **Evaluaciones realizadas:**
+            - ✔️ Compilación de código con Gradle
+            - ✔️ Ejecución de pruebas unitarias
+            - ✔️ Cobertura de código (JaCoCo - mínimo 90%)
+            - ✔️ Generación de reportes de pruebas
+            - ✔️ Creación de artefactos (JAR, reportes)
+
+            ---
+
+            ### 🔐 Job: Escaneo de Docker
+            **Estado:** ${getStatusIcon(docker_status)} ${docker_status}
+
+            **Evaluaciones realizadas:**
+            - ✔️ Construcción de imagen Docker
+            - ✔️ Escaneo de vulnerabilidades con Trivy
+            - ✔️ Análisis de severidad (CRITICAL, HIGH, MEDIUM, LOW)
+            - ✔️ Carga de resultados a Code Scanning
+            - ✔️ Validación de vulnerabilidades críticas
+
+            ---
+
+            **Timestamp:** ${new Date().toISOString()}
+            `;
+                        
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
